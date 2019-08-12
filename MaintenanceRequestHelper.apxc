@@ -1,0 +1,90 @@
+public class MaintenanceRequestHelper {
+    
+    public static List<Case> getRequiredFields(List<Case> maintenanceRequests){
+        return [SELECT Id, Equipment__r.Maintenance_Cycle__c, Old_Case__c, Status, Type, Origin, Vehicle__c, Equipment__c, Subject FROM Case WHERE Id = :maintenanceRequests];
+    }
+    
+    public static void updateWorkOrders(List<Case> maintenanceRequests,Map<Id,Case> oldMap){
+        //you create a new maintenance request for a future routine checkup
+        List<Case> newMaintenanceListForRoutineCheckup = new List<Case>();
+        List<Case> maintenanceRequestsThatMetTheCriteria = new List<Case>();
+        
+        for ( Case maintenanceRequest : getRequiredFields(maintenanceRequests) ) {
+            Case oldMaintenance = oldMap.get(maintenanceRequest.Id );
+            //When an existing maintenance request of type Repair or Routine Maintenance is Closed
+            if((maintenanceRequest.Type == 'Repair' || maintenanceRequest.Type == 'Routine Maintenance') && meetCriteria( maintenanceRequest, oldMaintenance )){
+                maintenanceRequestsThatMetTheCriteria.add(maintenanceRequest);
+            }
+        }
+        Map<Id, Decimal> mapMaintenanceIdWithCycleDays = calculateNextDueDate(maintenanceRequestsThatMetTheCriteria);
+        for(Case newMaintenanceRequest: maintenanceRequestsThatMetTheCriteria){
+         		 Case newCase = new Case();
+            	 newCase.Status = 'New';
+                 newCase.Origin = newMaintenanceRequest.Origin;
+                 //This new request is tied to the same vehicle 
+                 newCase.Vehicle__c = newMaintenanceRequest.Vehicle__c;
+                 //and piece of equipment to be serviced as the original closed service request.
+                 newCase.Equipment__c = newMaintenanceRequest.Equipment__c;
+                 //This new request's Type should be set as Routine Maintenance.
+                 newCase.Type = 'Routine Maintenance';
+                 //The Subject should not be null
+                 newCase.Subject =  String.isBlank( newMaintenanceRequest.Subject ) ? 'New Routine' : newMaintenanceRequest.Subject;
+                 //the Report Date field reflects the day the request was created.
+                 newCase.Date_Reported__c=System.today();
+                 if ( mapMaintenanceIdWithCycleDays.containsKey( newMaintenanceRequest.Id ) ) {
+                			newCase.Date_Due__c = System.today().addDays( ( Integer ) mapMaintenanceIdWithCycleDays.get( newMaintenanceRequest.Id ) );
+         		 } else {
+                			newCase.Date_Due__c = System.today().addDays( ( Integer ) newMaintenanceRequest.Equipment__r.Maintenance_Cycle__c );
+            	 }
+            	 newCase.Old_Case__c  = newMaintenanceRequest.Id;
+            	 newMaintenanceListForRoutineCheckup.add(newCase);
+        }
+        insert newMaintenanceListForRoutineCheckup;
+        updateRelatedWorkParts(newMaintenanceListForRoutineCheckup);
+    }
+    
+     // Once the new maintenance records are created, update the work parts
+    public static void updateRelatedWorkParts( List<Case> createdMaintenances) {
+        
+        Map<Id, Id> mapNewMaintenancesWithClosedMaintenances = new Map<Id, Id>();
+        for ( Case newMaintenances : createdMaintenances ) {
+            mapNewMaintenancesWithClosedMaintenances.put( newMaintenances.Old_Case__c , newMaintenances.Id );
+        }
+        
+        List<Work_Part__c> workParkList = [ SELECT Id, Maintenance_Request__c FROM Work_Part__c
+                                            WHERE Maintenance_Request__c =: mapNewMaintenancesWithClosedMaintenances.keySet() ];
+        
+        // Query work parts to be updated
+        for ( Work_Part__c workPart : workParkList ) {
+            //workPart.Maintenance_Request__c = mapNewMaintenancesWithClosedMaintenances.get( workPart.Maintenance_Request__c );
+        }
+        
+        update workParkList;
+    }
+    
+    public static Map<Id, Decimal> calculateNextDueDate( List<Case> maintenanceRequests){
+       //Therefore, you need to calculate and set the next due date using the maintenance cycle defined on the related work part records. 
+       //If multiple work parts are used in the maintenance request, choose the shortest maintenance cycle to define the service date.
+       AggregateResult[] listWorkParts = [ SELECT Maintenance_Request__c, MIN( Equipment__r.Maintenance_Cycle__c )
+           									FROM Work_Part__c WHERE Maintenance_Request__c =: maintenanceRequests 
+            								Group By Maintenance_Request__c ];
+        Map<Id, Decimal> mapWorkPartAndMaintenanceRecords = new Map<Id, Decimal>();        
+        for ( AggregateResult ar : listWorkParts ) {
+            mapWorkPartAndMaintenanceRecords.put( ( Id ) ar.get( 'Maintenance_Request__c' ), ( Decimal ) ar.get( 'expr0' ) );
+        }
+        
+        return mapWorkPartAndMaintenanceRecords;
+
+    }
+    
+      // Method to check if the cases being updated meet the criteria (They must be closed)
+    public static boolean meetCriteria( Case newcase, Case oldMaintenance ) {
+        if ( newCase.Status == 'Closed' && oldMaintenance.Status != newCase.Status ) {
+            return true;
+        }
+        return false;
+    }
+    
+    
+    
+}
